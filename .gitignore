@@ -2,3 +2,4 @@
 /.github/workflows/.main.yaml.~undo-tree~
 /.sconsign.dblite
 /test_parser
+.*\.~undo-tree~

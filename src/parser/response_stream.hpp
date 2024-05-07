@@ -16,6 +16,12 @@ public:
 		crlf
 	};
 	response_stream(istream &underlying_stream) : stream(underlying_stream) {}
+	friend
+	response_stream<istream> &operator>>(response_stream<istream> &i, char &c)
+	{
+		i.stream.read(&c, 1);
+		return i;
+	}
 	void data_item_ended_with(char c)
 	{
 		switch (c)
@@ -27,7 +33,7 @@ public:
 			last_item_end = list_end;
 			break;
 		case '\r':
-			stream.read(&c, 1);
+			*this >> c;
 			if (c != '\n')
 				throw parser_exception("Expected LF after CR");
 			last_item_end = crlf;

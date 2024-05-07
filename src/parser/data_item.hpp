@@ -31,13 +31,13 @@ public:
 	{
 		char c;
 		// Read first char to figure out what type of item to read
-		i.stream.read(&c, 1);
+		i >> c;
 		auto read_item = [&c, &i, &d](std::function<bool(void)> read_typed)
 		{
 			if (read_typed())
 			{
 				// End of item was clear without reading item delimiter
-				i.stream.read(&c, 1);
+				i >> c;
 			}
 			i.data_item_ended_with(c);
 		};
@@ -49,16 +49,16 @@ public:
 			{
 				d.item_type = type::quoted_string;
 				d.value = std::string();
-				i.stream.read(&c, 1);
+				i >> c;
 				while (c != '"')
 				{
 					if (c == '\\')
-						i.stream.read(&c, 1);
+						i >> c;
 					if (c != '\0' && c < 0x80)
 						std::get<std::string>(d.value) += c;
 					else
 						throw parser_exception("8-bit character in quoted string.");
-					i.stream.read(&c, 1);
+					i >> c;
 				}
 				return true;
 			});
@@ -87,18 +87,18 @@ public:
 				d.item_type = type::literal;
 				d.value = std::string();
 				unsigned int data_len = 0;
-				i.stream.read(&c, 1);
+				i >> c;
 				while (std::isdigit(c))
 				{
 					data_len += data_len*10 + c - '0';
-					i.stream.read(&c, 1);
+					i >> c;
 				}
 				if (c != '}')
 					throw parser_exception("Missing '}' after number of bytes in literal");
-				i.stream.read(&c, 1);
+				i >> c;
 				if (c != '\r')
 					throw parser_exception("Missing CR after number of bytes in literal");
-				i.stream.read(&c, 1);
+				i >> c;
 				if (c != '\n')
 					throw parser_exception("Missing LF after number of bytes in literal");
 				std::get<std::string>(d.value).resize(data_len);
@@ -117,7 +117,7 @@ public:
 					if (maybe_num && !std::isdigit(c))
 						maybe_num = false;
 					std::get<std::string>(d.value) += c;
-					i.stream.read(&c, 1);
+					i >> c;
 				}
 				if (maybe_num)
 				{

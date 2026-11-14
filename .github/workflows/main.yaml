@@ -16,16 +16,13 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v2
 
-    - name: Install SCons
-      run: sudo apt-get install -y scons
-
-    - name: Install Doctest
-      run: git clone https://github.com/doctest/doctest.git $HOME/doctest
+    - name: Setup xmake
+      uses: xmake-io/github-action-setup-xmake@v1
+      with:
+        xmake-version: latest
 
     - name: Build project
-      run: |
-        export DOCTEST_HOME=$HOME/doctest/doctest
-        scons
+      run: xmake
 
     - name: Run unit tests
-      run: ./test_parser
+      run: xmake run test_parser

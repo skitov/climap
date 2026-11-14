@@ -1,4 +1,7 @@
 /.xmake/
 /build/
+/.cache/
 /compile_commands.json
+/venv/
+*~
 .*\.~undo-tree~

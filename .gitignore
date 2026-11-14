@@ -1,5 +1,4 @@
-/test/parser/dataitem.o
-/.github/workflows/.main.yaml.~undo-tree~
-/.sconsign.dblite
-/test_parser
+/.xmake/
+/build/
+/compile_commands.json
 .*\.~undo-tree~

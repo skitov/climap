@@ -4,7 +4,7 @@
 #include <string>
 
 
-namespace imap_parser
+namespace climap::wire
 {
 class parser_exception : std::exception
 {

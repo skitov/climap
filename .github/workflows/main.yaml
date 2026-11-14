@@ -22,7 +22,7 @@ jobs:
         xmake-version: latest
 
     - name: Build project
-      run: xmake
+      run: xmake -y
 
     - name: Run unit tests
-      run: xmake run test_parser
+      run: xmake run test_wire

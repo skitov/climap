@@ -1,7 +1,7 @@
 #pragma once
 #include "parser_exception.hpp"
 
-namespace imap_parser
+namespace climap::wire
 {
 
 template <typename istream>
@@ -15,7 +15,7 @@ public:
 		list_end,
 		crlf
 	};
-	response_stream(istream &underlying_stream) : stream(underlying_stream) {}
+	response_stream(istream &underlying_stream) : stream(underlying_stream), new_response(true) {}
 	friend
 	response_stream<istream> &operator>>(response_stream<istream> &i, char &c)
 	{
@@ -41,6 +41,7 @@ public:
 		default:
 			throw parser_exception("Data item ended with unexcpected character.");
 		}
+		new_response = last_item_end == crlf;
 	}
 	istream &stream;
 	bool new_response;

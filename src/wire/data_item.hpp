@@ -8,22 +8,24 @@
 
 #include "response_stream.hpp"
 #include "parser_exception.hpp"
-#include "../lib/util.hpp"
+#include "lib/util.hpp"
 
-namespace imap_parser {
+namespace climap::wire {
 
 class data_item
 {
+	friend class response;
 public:
 	data_item(){};
 	enum type
 	{
-		atom = 0x1,
+		astring = 0x1,
 		quoted_string = 0x2,
 		literal = 0x4,
 		num = 0x8,
 		list = 0x10,
-		nil = 0x20
+		nil = 0x20,
+		atom = 0x41
 	};
 
 	template<typename istream>
@@ -107,13 +109,18 @@ public:
 			});
 			break;
 		default:
-			// This can be atom, nil or number
+			// This can be atom/astring, nil or number
 			read_item([&c, &i, &d]() -> bool
 			{
 				bool maybe_num = true;
 				d.value = std::string();
-				while (!is_atom_special(c))
+				while (!is_astring_special(c))
 				{
+					if (is_resp_special(c))
+					{
+						maybe_num = false;
+						d.item_type = astring;
+					}
 					if (maybe_num && !std::isdigit(c))
 						maybe_num = false;
 					std::get<std::string>(d.value) += c;
@@ -123,8 +130,11 @@ public:
 				{
 					d.item_type = num;
 					d.value = (unsigned)std::stoi(std::get<std::string>(d.value));
+					return false;
 				}
-				else if (lib::str_eq_ignore_case(std::get<std::string>(d.value), "nil"))
+				if (d.item_type == astring)
+					return false;
+				if (lib::str_eq_ignore_case(std::get<std::string>(d.value), "nil"))
 					d.item_type = nil;
 				else
 					d.item_type = atom;
@@ -137,6 +147,7 @@ public:
 
 	type data_type() {return item_type;}
 	std::variant<unsigned, std::string, std::vector<data_item>> &data_value() {return value;}
+
 private:
 	static bool is_resp_special(char c)
 	{
@@ -154,13 +165,16 @@ private:
 	{
 		return c <= 0x1f || c == 0x7f;
 	}
-	static bool is_atom_special(char c)
+	static bool is_astring_special(char c)
 	{
 		return is_ctl(c) ||
-			is_resp_special(c) ||
 			is_quoted_special(c) ||
 			is_list_wildcard(c) ||
 			c == '(' || c == ')' || c == '{' || c == ' ';
+	}
+	static bool is_atom_special(char c)
+	{
+		return is_resp_special(c) || is_astring_special(c);
 	}
 	std::variant<unsigned, std::string, std::vector<data_item>> value;
 	type item_type;

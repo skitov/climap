@@ -1,183 +1,260 @@
 #pragma once
 
-#include <string>
-#include <vector>
+#include <cstddef>
+#include <cstdint>
 #include <cctype>
-#include <functional>
+#include <limits>
+#include <string>
+#include <utility>
 #include <variant>
+#include <vector>
 
-#include "response_stream.hpp"
-#include "parser_exception.hpp"
 #include "lib/util.hpp"
+#include "limits.hpp"
+#include "parse_error.hpp"
+#include "reader.hpp"
 
-namespace climap::wire {
+namespace climap::wire
+{
 
+enum class item_kind
+{
+	undefined,
+	atom,
+	astring,
+	quoted,
+	literal,
+	number,
+	nil,
+	list,
+};
+
+// Generic, lossless representation of one IMAP data item.
+//
+// Parsing only enforces the wire grammar; response semantics are applied by
+// command-aware decoders in a higher layer.
 class data_item
 {
-	friend class response;
 public:
-	data_item(){};
-	enum type
-	{
-		astring = 0x1,
-		quoted_string = 0x2,
-		literal = 0x4,
-		num = 0x8,
-		list = 0x10,
-		nil = 0x20,
-		atom = 0x41
-	};
+	using value_type =
+		std::variant<std::monostate, unsigned, std::string, std::vector<data_item>>;
 
-	template<typename istream>
-	friend response_stream<istream> &operator >>(response_stream<istream> &i, data_item &d)
+	data_item() = default;
+	data_item(item_kind kind, value_type value)
+		: kind_(kind), value_(std::move(value))
 	{
-		char c;
-		// Read first char to figure out what type of item to read
-		i >> c;
-		auto read_item = [&c, &i, &d](std::function<bool(void)> read_typed)
-		{
-			if (read_typed())
-			{
-				// End of item was clear without reading item delimiter
-				i >> c;
-			}
-			i.data_item_ended_with(c);
-		};
-		switch (c)
-		{
-		case '"':
-			// Quoted string item
-			read_item([&c, &i, &d]() -> bool
-			{
-				d.item_type = type::quoted_string;
-				d.value = std::string();
-				i >> c;
-				while (c != '"')
-				{
-					if (c == '\\')
-						i >> c;
-					if (c != '\0' && c < 0x80)
-						std::get<std::string>(d.value) += c;
-					else
-						throw parser_exception("8-bit character in quoted string.");
-					i >> c;
-				}
-				return true;
-			});
-			break;
-		case '(':
-			// List item
-			read_item([&c, &i, &d]() -> bool
-			{
-				d.item_type = type::list;
-				d.value = std::vector<data_item>();
-				++i.list_level;
-				do
-				{
-					data_item list_entry;
-					i >> list_entry;
-					std::get<std::vector<data_item>>(d.value).push_back(list_entry);
-				} while (i.last_item_end != response_stream<istream>::list_end);
-				--i.list_level;
-				return true;
-			});
-			break;
-		case '{':
-			// Literal item
-			read_item([&c, &i, &d]() -> bool
-			{
-				d.item_type = type::literal;
-				d.value = std::string();
-				unsigned int data_len = 0;
-				i >> c;
-				while (std::isdigit(c))
-				{
-					data_len += data_len*10 + c - '0';
-					i >> c;
-				}
-				if (c != '}')
-					throw parser_exception("Missing '}' after number of bytes in literal");
-				i >> c;
-				if (c != '\r')
-					throw parser_exception("Missing CR after number of bytes in literal");
-				i >> c;
-				if (c != '\n')
-					throw parser_exception("Missing LF after number of bytes in literal");
-				std::get<std::string>(d.value).resize(data_len);
-				i.stream.read(&std::get<std::string>(d.value)[0], data_len);
-				return true;
-			});
-			break;
-		default:
-			// This can be atom/astring, nil or number
-			read_item([&c, &i, &d]() -> bool
-			{
-				bool maybe_num = true;
-				d.value = std::string();
-				while (!is_astring_special(c))
-				{
-					if (is_resp_special(c))
-					{
-						maybe_num = false;
-						d.item_type = astring;
-					}
-					if (maybe_num && !std::isdigit(c))
-						maybe_num = false;
-					std::get<std::string>(d.value) += c;
-					i >> c;
-				}
-				if (maybe_num)
-				{
-					d.item_type = num;
-					d.value = (unsigned)std::stoi(std::get<std::string>(d.value));
-					return false;
-				}
-				if (d.item_type == astring)
-					return false;
-				if (lib::str_eq_ignore_case(std::get<std::string>(d.value), "nil"))
-					d.item_type = nil;
-				else
-					d.item_type = atom;
-				return false;
-			});
-			break;
-		}
-		return i;
 	}
 
-	type data_type() {return item_type;}
-	std::variant<unsigned, std::string, std::vector<data_item>> &data_value() {return value;}
+	item_kind data_type() const noexcept { return kind_; }
+
+	value_type &data_value() noexcept { return value_; }
+	const value_type &data_value() const noexcept { return value_; }
+
+	bool operator==(const data_item &) const = default;
 
 private:
-	static bool is_resp_special(char c)
-	{
-		return c == ']';
-	}
-	static bool is_quoted_special(char c)
-	{
-		return c == '"' || c == '\\';
-	}
-	static bool is_list_wildcard(char c)
-	{
-		return c == '%' || c == '*';
-	}
-	static bool is_ctl(char c)
-	{
-		return c <= 0x1f || c == 0x7f;
-	}
-	static bool is_astring_special(char c)
-	{
-		return is_ctl(c) ||
-			is_quoted_special(c) ||
-			is_list_wildcard(c) ||
-			c == '(' || c == ')' || c == '{' || c == ' ';
-	}
-	static bool is_atom_special(char c)
-	{
-		return is_resp_special(c) || is_astring_special(c);
-	}
-	std::variant<unsigned, std::string, std::vector<data_item>> value;
-	type item_type;
+	item_kind kind_ = item_kind::undefined;
+	value_type value_;
 };
 
-};
+namespace detail
+{
+
+inline bool is_astring_special(unsigned char c)
+{
+	return c <= 0x1f || c == 0x7f ||
+	       c == '"' || c == '\\' ||
+	       c == '%' || c == '*' ||
+	       c == '(' || c == ')' || c == '{' || c == ' ';
+}
+
+inline data_item read_item(reader &r, const limits &lim, std::size_t depth);
+
+inline data_item read_quoted(reader &r, const limits &lim)
+{
+	r.expect('"');
+
+	std::string text;
+	while (true)
+	{
+		const std::size_t at = r.offset();
+		int c = r.get();
+		if (c == '"')
+			break;
+
+		if (c == '\\')
+		{
+			const std::size_t escaped_at = r.offset();
+			c = r.get();
+			if (c != '"' && c != '\\')
+				throw parse_error(parse_error_kind::invalid_character, escaped_at,
+				                  "invalid escape in quoted string");
+		}
+		else if (c == '\r' || c == '\n')
+		{
+			throw parse_error(parse_error_kind::invalid_character, at,
+			                  "CR or LF in quoted string");
+		}
+
+		if (text.size() >= lim.max_quoted_bytes)
+			throw parse_error(parse_error_kind::limit_exceeded, at,
+			                  "quoted string exceeds max_quoted_bytes (" +
+			                      std::to_string(lim.max_quoted_bytes) + ")");
+		text.push_back(static_cast<char>(c));
+	}
+
+	return data_item(item_kind::quoted, std::move(text));
+}
+
+inline data_item read_literal(reader &r, const limits &lim)
+{
+	r.expect('{');
+
+	std::uint64_t length = 0;
+	std::size_t digits = 0;
+	while (true)
+	{
+		const int c = r.peek();
+		if (c == std::char_traits<char>::eof() ||
+		    !std::isdigit(static_cast<unsigned char>(c)))
+			break;
+
+		const std::uint64_t digit = static_cast<std::uint64_t>(c - '0');
+		if (length >
+		    (std::numeric_limits<std::uint64_t>::max() - digit) / 10)
+			throw parse_error(parse_error_kind::number_overflow, r.offset(),
+			                  "literal length overflows 64 bits");
+
+		length = length * 10 + digit;
+		++digits;
+		r.get();
+
+		if (length > lim.max_literal_bytes)
+			throw parse_error(parse_error_kind::limit_exceeded, r.offset(),
+			                  "literal exceeds max_literal_bytes (" +
+			                      std::to_string(lim.max_literal_bytes) + ")");
+	}
+
+	if (digits == 0)
+		throw parse_error(parse_error_kind::invalid_character, r.offset(),
+		                  "missing literal length");
+
+	r.expect('}');
+	r.expect_crlf();
+
+	std::string data(static_cast<std::size_t>(length), '\0');
+	r.read_exact(data.data(), data.size());
+	return data_item(item_kind::literal, std::move(data));
+}
+
+inline data_item read_token(reader &r, const limits &lim)
+{
+	const std::size_t start = r.offset();
+	std::string text;
+	bool astring = false;
+	bool maybe_number = true;
+
+	while (!r.eof())
+	{
+		const int c = r.peek();
+		const unsigned char uc = static_cast<unsigned char>(c);
+		if (is_astring_special(uc))
+			break;
+
+		if (uc == ']')
+			astring = true;
+		if (maybe_number && !std::isdigit(uc))
+			maybe_number = false;
+
+		if (text.size() >= lim.max_atom_bytes)
+			throw parse_error(parse_error_kind::limit_exceeded, r.offset(),
+			                  "atom exceeds max_atom_bytes (" +
+			                      std::to_string(lim.max_atom_bytes) + ")");
+
+		text.push_back(static_cast<char>(r.get()));
+	}
+
+	if (text.empty())
+		throw parse_error(parse_error_kind::invalid_character, start,
+		                  "expected a data item");
+
+	if (maybe_number)
+	{
+		unsigned value = 0;
+		for (std::size_t i = 0; i < text.size(); ++i)
+		{
+			const unsigned digit = static_cast<unsigned>(text[i] - '0');
+			if (value > (std::numeric_limits<unsigned>::max() - digit) / 10)
+				throw parse_error(parse_error_kind::number_overflow, start + i,
+				                  "number does not fit in 32 bits");
+			value = value * 10 + digit;
+		}
+		return data_item(item_kind::number, value);
+	}
+
+	if (!astring && lib::str_eq_ignore_case(text, "nil"))
+		return data_item(item_kind::nil, std::monostate{});
+
+	return data_item(astring ? item_kind::astring : item_kind::atom,
+	                 std::move(text));
+}
+
+inline data_item read_list(reader &r, const limits &lim, std::size_t depth)
+{
+	r.expect('(');
+
+	std::vector<data_item> items;
+	if (r.peek() == ')')
+	{
+		r.get();
+		return data_item(item_kind::list, std::move(items));
+	}
+
+	while (true)
+	{
+		items.push_back(read_item(r, lim, depth));
+
+		const std::size_t at = r.offset();
+		const int c = r.get();
+		if (c == ')')
+			break;
+		if (c != ' ')
+			throw parse_error(parse_error_kind::invalid_character, at,
+			                  "expected space or ')' after list item");
+	}
+
+	return data_item(item_kind::list, std::move(items));
+}
+
+inline data_item read_item(reader &r, const limits &lim, std::size_t depth)
+{
+	if (r.eof())
+		throw parse_error(parse_error_kind::unexpected_eof, r.offset(),
+		                  "unexpected end of input before data item");
+
+	switch (r.peek())
+	{
+	case '"':
+		return read_quoted(r, lim);
+	case '{':
+		return read_literal(r, lim);
+	case '(':
+		if (depth >= lim.max_list_depth)
+			throw parse_error(parse_error_kind::limit_exceeded, r.offset(),
+			                  "list nesting exceeds max_list_depth (" +
+			                      std::to_string(lim.max_list_depth) + ")");
+		return read_list(r, lim, depth + 1);
+	default:
+		return read_token(r, lim);
+	}
+}
+
+}
+
+// Reads one data item, leaving the terminating delimiter unconsumed.
+inline data_item read_item(reader &r)
+{
+	return detail::read_item(r, r.limit_config(), 0);
+}
+
+}

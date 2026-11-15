@@ -1,105 +1,328 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+
+#include <optional>
 #include <sstream>
+#include <string>
+#include <variant>
+#include <vector>
+
 #include "doctest.h"
 #include "wire/data_item.hpp"
+#include "wire/reader.hpp"
+
+using climap::wire::data_item;
+using climap::wire::item_kind;
+using climap::wire::limits;
+using climap::wire::parse_error;
+using climap::wire::parse_error_kind;
+using climap::wire::reader;
+
+namespace
+{
+
+template <typename Fn>
+std::optional<parse_error> capture_error(Fn fn)
+{
+	try
+	{
+		fn();
+	}
+	catch (const parse_error &e)
+	{
+		return e;
+	}
+	return std::nullopt;
+}
+
+data_item parse(const std::string &text)
+{
+	std::istringstream in(text);
+	reader r(*in.rdbuf());
+	return climap::wire::read_item(r);
+}
+
+}
 
 TEST_CASE("Data item parsing")
 {
-	std::istringstream input_stream;
-
 	SUBCASE("Parsing an atom")
 	{
-		input_stream.str("ATOM x");
-		climap::wire::response_stream<std::istringstream> stream(input_stream);
-		climap::wire::data_item item;
-		stream >> item;
-		CHECK(item.data_type() == climap::wire::data_item::atom);
+		std::istringstream in("ATOM x");
+		reader r(*in.rdbuf());
+
+		const data_item item = climap::wire::read_item(r);
+		CHECK(item.data_type() == item_kind::atom);
 		CHECK(std::get<std::string>(item.data_value()) == "ATOM");
+		CHECK(r.peek() == ' ');
 	}
 
 	SUBCASE("Parsing an astring")
 	{
-		input_stream.str("ATO[]M x");
-		climap::wire::response_stream<std::istringstream> stream(input_stream);
-		climap::wire::data_item item;
-		stream >> item;
-		CHECK(item.data_type() == climap::wire::data_item::astring);
+		const data_item item = parse("ATO[]M x");
+		CHECK(item.data_type() == item_kind::astring);
 		CHECK(std::get<std::string>(item.data_value()) == "ATO[]M");
 	}
 
 	SUBCASE("Parsing a quoted string")
 	{
-		input_stream.str("\"Quoted String\"\r\n");
-		climap::wire::response_stream<std::istringstream> stream(input_stream);
-		climap::wire::data_item item;
-		stream >> item;
-		CHECK(item.data_type() == climap::wire::data_item::quoted_string);
+		const data_item item = parse("\"Quoted String\"\r\n");
+		CHECK(item.data_type() == item_kind::quoted);
 		CHECK(std::get<std::string>(item.data_value()) == "Quoted String");
+	}
+
+	SUBCASE("Quoted strings accept 8-bit bytes")
+	{
+		std::string input = "\"";
+		input.push_back(static_cast<char>(0x80));
+		input += "\" ";
+
+		const data_item item = parse(input);
+		CHECK(item.data_type() == item_kind::quoted);
+		CHECK(std::get<std::string>(item.data_value()) ==
+		      std::string(1, static_cast<char>(0x80)));
+	}
+
+	SUBCASE("Quoted strings support escapes")
+	{
+		const data_item item = parse("\"a\\\"b\\\\c\" ");
+		CHECK(std::get<std::string>(item.data_value()) == "a\"b\\c");
 	}
 
 	SUBCASE("Parsing a literal")
 	{
-		input_stream.str("{5}\r\nHello ");
-		climap::wire::response_stream<std::istringstream> stream(input_stream);
-		climap::wire::data_item item;
-		stream >> item;
-		CHECK(item.data_type() == climap::wire::data_item::literal);
+		const data_item item = parse("{5}\r\nHello ");
+		CHECK(item.data_type() == item_kind::literal);
 		CHECK(std::get<std::string>(item.data_value()) == "Hello");
+	}
+
+	SUBCASE("Literal length is accumulated correctly")
+	{
+		const std::string payload = "Hello, World";
+		const data_item item = parse("{12}\r\n" + payload);
+		CHECK(item.data_type() == item_kind::literal);
+		CHECK(std::get<std::string>(item.data_value()) == payload);
+	}
+
+	SUBCASE("Empty literals are allowed")
+	{
+		const data_item item = parse("{0}\r\n ");
+		CHECK(item.data_type() == item_kind::literal);
+		CHECK(std::get<std::string>(item.data_value()).empty());
 	}
 
 	SUBCASE("Parsing a numeric value")
 	{
-		input_stream.str("1234\r\n");
-		climap::wire::response_stream<std::istringstream> stream(input_stream);
-		climap::wire::data_item item;
-		stream >> item;
-		CHECK(item.data_type() == climap::wire::data_item::num);
-		CHECK(std::get<unsigned>(item.data_value()) == 1234);
+		const data_item item = parse("1234\r\n");
+		CHECK(item.data_type() == item_kind::number);
+		CHECK(std::get<unsigned>(item.data_value()) == 1234u);
+	}
+
+	SUBCASE("Numeric prefix does not make an atom a number")
+	{
+		const data_item item = parse("123abc ");
+		CHECK(item.data_type() == item_kind::atom);
+		CHECK(std::get<std::string>(item.data_value()) == "123abc");
 	}
 
 	SUBCASE("Parsing a NIL value")
 	{
-		input_stream.str("NIL ");
-		climap::wire::response_stream<std::istringstream> stream(input_stream);
-		climap::wire::data_item item;
-		stream >> item;
-		CHECK(item.data_type() == climap::wire::data_item::nil);
+		const data_item item = parse("NIL ");
+		CHECK(item.data_type() == item_kind::nil);
+		CHECK(std::holds_alternative<std::monostate>(item.data_value()));
+	}
+
+	SUBCASE("NIL is case-insensitive")
+	{
+		CHECK(parse("nil ").data_type() == item_kind::nil);
+		CHECK(parse("Nil ").data_type() == item_kind::nil);
+	}
+
+	SUBCASE("NIL with a response special is an astring")
+	{
+		const data_item item = parse("NIL] ");
+		CHECK(item.data_type() == item_kind::astring);
+		CHECK(std::get<std::string>(item.data_value()) == "NIL]");
 	}
 
 	SUBCASE("Parsing a list")
 	{
-		input_stream.str("(ATOM \"String\" 123 NIL (first second)) ");
-		climap::wire::response_stream<std::istringstream> stream(input_stream);
-		climap::wire::data_item item;
-		stream >> item;
-		CHECK(item.data_type() == climap::wire::data_item::list);
-		CHECK(std::get<std::vector<climap::wire::data_item>>(item.data_value()).size() == 5);
+		const data_item item = parse("(ATOM \"String\" 123 NIL (first second)) ");
+		REQUIRE(item.data_type() == item_kind::list);
+
+		auto &items = std::get<std::vector<data_item>>(item.data_value());
+		REQUIRE(items.size() == 5);
+		CHECK(items[0].data_type() == item_kind::atom);
+		CHECK(items[1].data_type() == item_kind::quoted);
+		CHECK(items[2].data_type() == item_kind::number);
+		CHECK(items[3].data_type() == item_kind::nil);
+		REQUIRE(items[4].data_type() == item_kind::list);
+		CHECK(std::get<std::vector<data_item>>(items[4].data_value()).size() == 2);
 	}
 
-	SUBCASE("Parsing incorrect input")
+	SUBCASE("Parsing an empty list")
 	{
-		// Test parsing an incomplete quoted string
-		// input_stream.str("\"Incomplete Quoted String");
-		// climap::wire::response_stream<std::istringstream> stream1(input_stream);
-		// climap::wire::data_item item1;
-		// CHECK_THROWS(stream1 >> item1);
+		const data_item item = parse("() ");
+		REQUIRE(item.data_type() == item_kind::list);
+		CHECK(std::get<std::vector<data_item>>(item.data_value()).empty());
+	}
 
-		// Test parsing a literal with missing delimiter '}'
-		input_stream.str("{5\r\nHello");
-		climap::wire::response_stream<std::istringstream> stream2(input_stream);
-		climap::wire::data_item item2;
-		CHECK_THROWS(stream2 >> item2);
+	SUBCASE("Data items compare by value")
+	{
+		CHECK(parse("ATOM ") == parse("ATOM "));
+		CHECK(parse("NIL ") == parse("nil "));
+		CHECK(parse("ATOM ") != parse("ATOMX "));
+	}
 
-		// Test parsing a literal with missing CR
-		input_stream.str("{5}\nHello");
-		climap::wire::response_stream<std::istringstream> stream3(input_stream);
-		climap::wire::data_item item3;
-		CHECK_THROWS(stream3 >> item3);
+	SUBCASE("Unterminated quoted string")
+	{
+		std::istringstream in("\"Incomplete");
+		reader r(*in.rdbuf());
 
-		// Test parsing a literal with missing LF
-		input_stream.str("{5}\rHello");
-		climap::wire::response_stream<std::istringstream> stream4(input_stream);
-		climap::wire::data_item item4;
-		CHECK_THROWS(stream4 >> item4);
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::unexpected_eof);
+	}
+
+	SUBCASE("Invalid escape in quoted string")
+	{
+		std::istringstream in("\"a\\q\" ");
+		reader r(*in.rdbuf());
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::invalid_character);
+		CHECK(err->offset() == 3);
+	}
+
+	SUBCASE("CR or LF inside a quoted string")
+	{
+		std::istringstream in("\"a\rb\" ");
+		reader r(*in.rdbuf());
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::invalid_character);
+	}
+
+	SUBCASE("Literal with a missing closing brace")
+	{
+		std::istringstream in("{5\r\nHello");
+		reader r(*in.rdbuf());
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::invalid_character);
+	}
+
+	SUBCASE("Literal with a missing CR")
+	{
+		std::istringstream in("{5}\nHello");
+		reader r(*in.rdbuf());
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::bad_crlf);
+	}
+
+	SUBCASE("Literal with a missing LF")
+	{
+		std::istringstream in("{5}\rHello");
+		reader r(*in.rdbuf());
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::bad_crlf);
+	}
+
+	SUBCASE("Literal shorter than its declared length")
+	{
+		std::istringstream in("{5}\r\nHell");
+		reader r(*in.rdbuf());
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::unexpected_eof);
+	}
+
+	SUBCASE("Number overflow")
+	{
+		std::istringstream in("4294967296 ");
+		reader r(*in.rdbuf());
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::number_overflow);
+	}
+
+	SUBCASE("Unterminated list")
+	{
+		std::istringstream in("(ATOM");
+		reader r(*in.rdbuf());
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::unexpected_eof);
+	}
+
+	SUBCASE("Trailing space in a list")
+	{
+		std::istringstream in("(ATOM )");
+		reader r(*in.rdbuf());
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::invalid_character);
+	}
+
+	SUBCASE("Literal size limit")
+	{
+		limits lim;
+		lim.max_literal_bytes = 4;
+
+		std::istringstream in("{5}\r\nHello ");
+		reader r(*in.rdbuf(), lim);
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::limit_exceeded);
+	}
+
+	SUBCASE("List depth limit")
+	{
+		limits lim;
+		lim.max_list_depth = 2;
+
+		std::istringstream in("((())) ");
+		reader r(*in.rdbuf(), lim);
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::limit_exceeded);
+	}
+
+	SUBCASE("Atom size limit")
+	{
+		limits lim;
+		lim.max_atom_bytes = 3;
+
+		std::istringstream in("ABCD ");
+		reader r(*in.rdbuf(), lim);
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::limit_exceeded);
+	}
+
+	SUBCASE("Quoted string size limit")
+	{
+		limits lim;
+		lim.max_quoted_bytes = 4;
+
+		std::istringstream in("\"abcde\" ");
+		reader r(*in.rdbuf(), lim);
+
+		auto err = capture_error([&] { climap::wire::read_item(r); });
+		REQUIRE(err.has_value());
+		CHECK(err->kind() == parse_error_kind::limit_exceeded);
 	}
 }

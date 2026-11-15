@@ -8,5 +8,8 @@
 
 #include "lib/util.hpp"
 #include "wire/data_item.hpp"
+#include "wire/limits.hpp"
+#include "wire/parse_error.hpp"
 #include "wire/parser_exception.hpp"
+#include "wire/reader.hpp"
 #include "wire/response_stream.hpp"

@@ -16,6 +16,8 @@ struct limits
 	std::size_t max_items_per_response = 100000;
 	// Maximum size of a single atom/astring token.
 	std::size_t max_atom_bytes = 64 * 1024;
+	// Maximum size of a quoted string.
+	std::size_t max_quoted_bytes = 1024 * 1024;
 	// Maximum length of a CRLF-terminated line.
 	std::size_t max_line_bytes = 64 * 1024;
 };
